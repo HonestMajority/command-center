@@ -77,8 +77,8 @@ pub trait Runtime {
     fn send_keys_to_pane(&self, pane_id: &str, message: &str) -> anyhow::Result<()>;
     fn capture_pane_output(&self, pane_id: &str) -> anyhow::Result<String>;
     fn remove_worktree(&self, path: &Path) -> anyhow::Result<()>;
-    fn kill_tmux_session(&self, session_name: &str) -> anyhow::Result<()>;
-    fn select_session(&self, session_name: &str) -> anyhow::Result<()>;
+    fn kill_task_env(&self, env_id: &str) -> anyhow::Result<()>;
+    fn select_task_env(&self, env_id: &str) -> anyhow::Result<()>;
 }
 
 pub struct TmuxRuntime;
@@ -88,118 +88,66 @@ impl TmuxRuntime {
         tmux_cmd(args)
     }
 
-    fn resolve_binary(&self, name: &str) -> anyhow::Result<String> {
-        let output = Command::new("which")
-            .arg(name)
-            .output()
-            .with_context(|| format!("failed to find {name}"))?;
-
-        if !output.status.success() {
-            bail!("{name} not found in PATH");
-        }
-
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-    }
-
-    /// Create a dedicated tmux session for a task with 4 windows:
-    ///   0: nvim   – editor
-    ///   1: lazygit – git UI
-    ///   2: claude  – the agent
-    ///   3: shell   – general purpose
-    fn launch_agent_session(
+    fn launch_agent_window(
         &self,
         task_name: &str,
-        task_id_short: &str,
         work_dir: &Path,
         claude_cmd: &str,
     ) -> anyhow::Result<SpawnResult> {
+        if std::env::var("TMUX").is_err() {
+            bail!("clat spawn must be run inside a tmux session");
+        }
+
         let work_dir_str = work_dir.display().to_string();
-        let session_name = sanitize_tmux_session_name(task_name, task_id_short);
+        let window_name = format!("cc:{task_name}");
 
-        // Window 0: nvim (created with the session)
-        self.tmux_cmd(&[
-            "new-session",
+        let window_id = self.tmux_cmd(&[
+            "new-window",
             "-d",
-            "-s",
-            &session_name,
+            "-P",
+            "-F",
+            "#{window_id}",
             "-n",
-            "nvim",
+            &window_name,
             "-c",
             &work_dir_str,
-        ])?;
-        self.tmux_cmd(&[
-            "send-keys",
-            "-t",
-            &format!("{session_name}:nvim"),
-            "nvim .",
-            "Enter",
         ])?;
 
-        // Window 1: lazygit
-        self.tmux_cmd(&[
-            "new-window",
-            "-t",
-            &session_name,
-            "-n",
-            "lazygit",
-            "-c",
-            &work_dir_str,
-        ])?;
-        self.tmux_cmd(&[
-            "send-keys",
-            "-t",
-            &format!("{session_name}:lazygit"),
-            "lazygit",
-            "Enter",
-        ])?;
+        let top_pane = self.tmux_cmd(&["list-panes", "-t", &window_id, "-F", "#{pane_id}"])?;
 
-        // Window 2: claude (the agent)
-        self.tmux_cmd(&[
-            "new-window",
+        let bottom_pane = self.tmux_cmd(&[
+            "split-window",
+            "-v",
             "-t",
-            &session_name,
-            "-n",
-            "claude",
-            "-c",
-            &work_dir_str,
-        ])?;
-        let claude_pane = self.tmux_cmd(&[
-            "list-panes",
-            "-t",
-            &format!("{session_name}:claude"),
+            &top_pane,
+            "-P",
             "-F",
             "#{pane_id}",
-        ])?;
-        self.tmux_cmd(&[
-            "send-keys",
-            "-t",
-            &format!("{session_name}:claude"),
-            "-l",
-            claude_cmd,
-        ])?;
-        self.tmux_cmd(&[
-            "send-keys",
-            "-t",
-            &format!("{session_name}:claude"),
-            "Enter",
-        ])?;
-
-        // Window 3: shell
-        self.tmux_cmd(&[
-            "new-window",
-            "-t",
-            &session_name,
-            "-n",
-            "shell",
             "-c",
             &work_dir_str,
         ])?;
 
-        // Focus the claude window by default
-        self.tmux_cmd(&["select-window", "-t", &format!("{session_name}:claude")])?;
+        self.tmux_cmd(&["resize-pane", "-t", &top_pane, "-D", "8"])?;
+
+        let claude_pane = self.tmux_cmd(&[
+            "split-window",
+            "-h",
+            "-t",
+            &bottom_pane,
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-c",
+            &work_dir_str,
+        ])?;
+
+        self.tmux_cmd(&["send-keys", "-t", &claude_pane, "-l", claude_cmd])?;
+        self.tmux_cmd(&["send-keys", "-t", &claude_pane, "Enter"])?;
+        self.tmux_cmd(&["send-keys", "-t", &top_pane, "-l", "nvim ."])?;
+        self.tmux_cmd(&["send-keys", "-t", &top_pane, "Enter"])?;
 
         Ok(SpawnResult {
-            window_id: WindowId::from(session_name),
+            window_id: WindowId::from(window_id),
             pane_id: PaneId::from(claude_pane),
         })
     }
@@ -336,7 +284,7 @@ impl Runtime for TmuxRuntime {
     }
 
     fn launch_agent(&self, config: LaunchConfig) -> anyhow::Result<SpawnResult> {
-        let claude_bin = self.resolve_binary("claude")?;
+        let claude_bin = resolve_binary("claude")?;
 
         let claude_dir = config.work_dir.join(".claude");
         std::fs::create_dir_all(&claude_dir)?;
@@ -376,23 +324,18 @@ impl Runtime for TmuxRuntime {
             std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))?;
         }
 
-        self.launch_agent_session(
-            config.task_name,
-            config.task_id_short,
-            config.work_dir,
-            "sh .claude/launch.sh",
-        )
+        self.launch_agent_window(config.task_name, config.work_dir, "sh .claude/launch.sh")
     }
 
     fn resume_agent(
         &self,
         task_name: &str,
-        task_id_short: &str,
+        _task_id_short: &str,
         session_id: &str,
         work_dir: &Path,
         skip_permissions: bool,
     ) -> anyhow::Result<SpawnResult> {
-        let claude_bin = self.resolve_binary("claude")?;
+        let claude_bin = resolve_binary("claude")?;
         let skip_flag = if skip_permissions {
             " --dangerously-skip-permissions"
         } else {
@@ -400,16 +343,16 @@ impl Runtime for TmuxRuntime {
         };
         let claude_cmd = format!("env -u CLAUDECODE {claude_bin}{skip_flag} --resume {session_id}");
 
-        self.launch_agent_session(task_name, task_id_short, work_dir, &claude_cmd)
+        self.launch_agent_window(task_name, work_dir, &claude_cmd)
     }
 
     fn relaunch_agent(
         &self,
         task_name: &str,
-        task_id_short: &str,
+        _task_id_short: &str,
         work_dir: &Path,
     ) -> anyhow::Result<SpawnResult> {
-        self.launch_agent_session(task_name, task_id_short, work_dir, "sh .claude/launch.sh")
+        self.launch_agent_window(task_name, work_dir, "sh .claude/launch.sh")
     }
 
     fn send_keys_to_pane(&self, pane_id: &str, message: &str) -> anyhow::Result<()> {
@@ -439,15 +382,29 @@ impl Runtime for TmuxRuntime {
         Ok(())
     }
 
-    fn kill_tmux_session(&self, session_name: &str) -> anyhow::Result<()> {
-        self.tmux_cmd(&["kill-session", "-t", session_name])?;
+    fn kill_task_env(&self, window_id: &str) -> anyhow::Result<()> {
+        self.tmux_cmd(&["kill-window", "-t", window_id])?;
         Ok(())
     }
 
-    fn select_session(&self, session_name: &str) -> anyhow::Result<()> {
-        self.tmux_cmd(&["switch-client", "-t", session_name])?;
+    fn select_task_env(&self, window_id: &str) -> anyhow::Result<()> {
+        self.tmux_cmd(&["select-window", "-t", window_id])?;
         Ok(())
     }
+}
+
+/// Resolve a binary's full path via `which`.
+pub(crate) fn resolve_binary(name: &str) -> anyhow::Result<String> {
+    let output = Command::new("which")
+        .arg(name)
+        .output()
+        .with_context(|| format!("failed to find {name}"))?;
+
+    if !output.status.success() {
+        bail!("{name} not found in PATH");
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 /// Copy hooks config and write settings into a worktree's `.claude/` directory.
@@ -729,21 +686,6 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Returns the set of active tmux session names.
-/// Each task now gets its own session, so we just check which sessions exist.
-pub fn tmux_session_names() -> HashSet<WindowId> {
-    let mut set = HashSet::new();
-    if let Ok(output) = tmux_cmd(&["list-sessions", "-F", "#{session_name}"]) {
-        for line in output.lines() {
-            let name = line.trim();
-            if !name.is_empty() {
-                set.insert(WindowId::from(name.to_string()));
-            }
-        }
-    }
-    set
-}
-
 /// Returns the set of pane IDs that appear idle by inspecting the Claude Code UI.
 /// A pane is idle when its last non-empty line does NOT contain "esc" (case-insensitive),
 /// since Claude Code shows "esc to interrupt" / "Esc to cancel" while actively working.
@@ -762,17 +704,6 @@ pub fn idle_panes(pane_ids: &[&PaneId]) -> HashSet<PaneId> {
         }
     }
     set
-}
-
-/// Sanitize a task name into a valid, unique tmux session name.
-/// Tmux session names cannot contain dots or colons. We include the task ID
-/// short hash to guarantee uniqueness even when multiple tasks share a name.
-fn sanitize_tmux_session_name(task_name: &str, task_id_short: &str) -> String {
-    let clean: String = task_name
-        .chars()
-        .map(|c| if c == '.' || c == ':' { '-' } else { c })
-        .collect();
-    format!("cc-{clean}-{task_id_short}")
 }
 
 /// Free function for workspace bootstrapping (cmd_start), not a task operation.

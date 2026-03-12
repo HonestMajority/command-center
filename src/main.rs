@@ -8,6 +8,7 @@ mod runtime;
 mod skill;
 mod store;
 mod task;
+mod tmux_session;
 mod tui;
 
 use anyhow::{Context, bail};
@@ -17,7 +18,8 @@ use tabled::{Table, Tabled};
 use crate::app::{ClatApp, PromptMode, SpawnRequest, WorkDirMode};
 use crate::cli::{AgentCommand, Cli, Command, ProjectAction, SkillAction};
 use crate::primitives::MessageRole;
-use crate::runtime::{Runtime, TmuxRuntime};
+use crate::runtime::Runtime;
+use crate::tmux_session::TmuxSessionRuntime;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -44,7 +46,7 @@ async fn main() -> anyhow::Result<()> {
         } => *dangerously_skip_permissions,
         _ => false,
     };
-    let app = ClatApp::try_new(TmuxRuntime, skip_permissions).await?;
+    let app = ClatApp::try_new(TmuxSessionRuntime, skip_permissions).await?;
 
     match command {
         Command::Spawn {
@@ -200,7 +202,7 @@ async fn cmd_list(
         exit_code: String,
     }
 
-    let active_sessions = app.active_sessions();
+    let active_envs = app.active_task_envs();
     let running_pane_ids: Vec<crate::primitives::PaneId> = tasks
         .iter()
         .filter(|t| t.status.is_running())
@@ -227,7 +229,7 @@ async fn cmd_list(
                     .tmux_window
                     .as_ref()
                     .map(|w| {
-                        if active_sessions.contains(w) {
+                        if active_envs.contains(w) {
                             "●".to_string()
                         } else {
                             "-".to_string()

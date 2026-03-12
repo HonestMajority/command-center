@@ -12,8 +12,8 @@ pub struct TaskListState {
     selected_messages: Vec<TaskMessage>,
     detail_scroll: u16,
     detail_live_output: Option<String>,
-    /// Set of tmux session names that currently exist.
-    active_sessions: HashSet<WindowId>,
+    /// Set of task environment IDs (tmux session/window names) that currently exist.
+    active_envs: HashSet<WindowId>,
     /// Pane IDs that are actively working (hook reported activity).
     /// Absence from this set means idle (the safe default).
     active_panes: HashSet<PaneId>,
@@ -34,7 +34,7 @@ impl TaskListState {
             selected_messages: Vec::new(),
             detail_scroll: 0,
             detail_live_output: None,
-            active_sessions: HashSet::new(),
+            active_envs: HashSet::new(),
             active_panes: HashSet::new(),
             filtered_indices: Vec::new(),
         }
@@ -82,14 +82,14 @@ impl TaskListState {
         self.detail_live_output.as_deref()
     }
 
-    // ── Session tracking ──────────────────────────────────────────────
+    // ── Task environment tracking ───────────────────────────────────────
 
-    pub fn update_active_sessions(&mut self, sessions: HashSet<WindowId>) {
-        self.active_sessions = sessions;
+    pub fn update_active_envs(&mut self, envs: HashSet<WindowId>) {
+        self.active_envs = envs;
     }
 
-    pub fn has_active_session(&self, id: &WindowId) -> bool {
-        self.active_sessions.contains(id)
+    pub fn has_active_env(&self, id: &WindowId) -> bool {
+        self.active_envs.contains(id)
     }
 
     // ── Active panes ────────────────────────────────────────────────

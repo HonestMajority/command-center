@@ -31,7 +31,7 @@ fn task_list_item(
         .tmux_window
         .as_ref()
         .map(|w| {
-            if task_list.has_active_session(w) {
+            if task_list.has_active_env(w) {
                 "●"
             } else {
                 "-"

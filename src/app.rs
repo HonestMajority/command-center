@@ -276,7 +276,7 @@ impl<R: Runtime> ClatApp<R> {
             .and_then(|pane| self.runtime.capture_pane_output(pane.as_str()).ok());
 
         if let Some(ref window_id) = task.tmux_window {
-            let _ = self.runtime.kill_tmux_session(window_id.as_str());
+            let _ = self.runtime.kill_task_env(window_id.as_str());
         }
 
         let closed = self.store.close_task(&task.id, output.as_deref()).await?;
@@ -295,7 +295,7 @@ impl<R: Runtime> ClatApp<R> {
 
         if task.status.is_running() {
             if let Some(ref window_id) = task.tmux_window {
-                let _ = self.runtime.kill_tmux_session(window_id.as_str());
+                let _ = self.runtime.kill_task_env(window_id.as_str());
             }
             let _ = self.store.close_task(&task.id, None).await;
         }
@@ -384,16 +384,16 @@ impl<R: Runtime> ClatApp<R> {
     pub async fn goto(&self, id_prefix: &str) -> anyhow::Result<()> {
         let task = self.resolve_task(id_prefix).await?;
 
-        let session_name = task
+        let env_id = task
             .tmux_window
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("task {} has no tmux session", task.id.short()))?;
+            .ok_or_else(|| anyhow::anyhow!("task {} has no task env", task.id.short()))?;
 
-        self.runtime.select_session(session_name.as_str())
+        self.runtime.select_task_env(env_id.as_str())
     }
 
-    pub fn goto_session(&self, session_name: &WindowId) {
-        let _ = self.runtime.select_session(session_name.as_str());
+    pub fn goto_task_env(&self, env_id: &WindowId) {
+        let _ = self.runtime.select_task_env(env_id.as_str());
     }
 
     pub async fn log(&self, id_prefix: &str) -> anyhow::Result<LogOutput> {
@@ -496,8 +496,8 @@ impl<R: Runtime> ClatApp<R> {
         self.runtime.capture_pane_output(pane_id).ok()
     }
 
-    pub fn active_sessions(&self) -> HashSet<WindowId> {
-        crate::runtime::tmux_session_names()
+    pub fn active_task_envs(&self) -> HashSet<WindowId> {
+        crate::tmux_session::active_task_envs()
     }
 
     pub async fn insert_session_message(
@@ -631,11 +631,11 @@ mod tests {
         RemoveWorktree {
             path: PathBuf,
         },
-        KillSession {
-            session_name: String,
+        KillTaskEnv {
+            env_id: String,
         },
-        SelectSession {
-            session_name: String,
+        SelectTaskEnv {
+            env_id: String,
         },
     }
 
@@ -776,9 +776,9 @@ mod tests {
             Ok(())
         }
 
-        fn kill_tmux_session(&self, session_name: &str) -> anyhow::Result<()> {
-            self.calls.borrow_mut().push(Call::KillSession {
-                session_name: session_name.to_string(),
+        fn kill_task_env(&self, env_id: &str) -> anyhow::Result<()> {
+            self.calls.borrow_mut().push(Call::KillTaskEnv {
+                env_id: env_id.to_string(),
             });
             if *self.kill_should_fail.borrow() {
                 bail!("kill failed");
@@ -786,9 +786,9 @@ mod tests {
             Ok(())
         }
 
-        fn select_session(&self, session_name: &str) -> anyhow::Result<()> {
-            self.calls.borrow_mut().push(Call::SelectSession {
-                session_name: session_name.to_string(),
+        fn select_task_env(&self, env_id: &str) -> anyhow::Result<()> {
+            self.calls.borrow_mut().push(Call::SelectTaskEnv {
+                env_id: env_id.to_string(),
             });
             Ok(())
         }
@@ -907,7 +907,7 @@ prompt = "noop prompt"
             .unwrap();
         let kill_pos = calls
             .iter()
-            .position(|c| matches!(c, Call::KillSession { .. }))
+            .position(|c| matches!(c, Call::KillTaskEnv { .. }))
             .unwrap();
         assert!(capture_pos < kill_pos);
     }
@@ -985,7 +985,7 @@ prompt = "noop prompt"
     }
 
     #[tokio::test]
-    async fn goto_calls_select_session() {
+    async fn goto_calls_select_task_env() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = test_paths(tmp.path());
         let store = Store::open_in_memory().await.unwrap();
@@ -997,7 +997,7 @@ prompt = "noop prompt"
 
         let calls = service.runtime().calls.borrow();
         assert!(calls.iter().any(|c| matches!(c,
-            Call::SelectSession { session_name } if session_name == "@fake-win"
+            Call::SelectTaskEnv { env_id } if env_id == "@fake-win"
         )));
     }
 
@@ -1030,7 +1030,7 @@ prompt = "noop prompt"
 
         let err = service.goto(task_id.as_str()).await;
         assert!(err.is_err());
-        assert!(err.unwrap_err().to_string().contains("no tmux session"));
+        assert!(err.unwrap_err().to_string().contains("no task env"));
     }
 
     #[tokio::test]
