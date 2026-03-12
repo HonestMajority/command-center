@@ -426,7 +426,7 @@ async fn handle_task_list_key<R: Runtime>(
     } else if kb.scroll_up.matches(&key) {
         state.scroll_up_tasks();
     } else if kb.goto_window.matches(&key) {
-        goto_task_window(state, app).await;
+        goto_task_env(state, app).await;
     } else if kb.open_detail.matches(&key) {
         state.open_selected_task();
     } else if kb.close_task.matches(&key) {
@@ -513,7 +513,7 @@ async fn handle_task_chat_input_key<R: Runtime>(
     } else if kb.focus_tasks.matches(&key) {
         state.focus_on_tasks();
     } else if kb.goto_window.matches(&key) {
-        goto_task_window(state, app).await;
+        goto_task_env(state, app).await;
     } else if kb.send.matches(&key) {
         let active = state.active_state_mut();
         if !active.input.is_empty() {
@@ -739,21 +739,21 @@ async fn handle_confirm_close_project_key<R: Runtime>(
     }
 }
 
-/// Shared: go to the selected task's tmux window (or reopen if closed).
-async fn goto_task_window<R: Runtime>(state: &mut ScreenState, app: &ClatApp<R>) {
+/// Shared: go to the selected task's environment (or reopen if closed).
+async fn goto_task_env<R: Runtime>(state: &mut ScreenState, app: &ClatApp<R>) {
     if let Some(task) = state.selected_task() {
         if task.status.is_running() {
-            if let Some(window_id) = &task.tmux_window {
-                app.goto_window(window_id);
+            if let Some(env_id) = &task.tmux_window {
+                app.goto_task_env(env_id);
             }
         } else {
             let id = task.id.to_string();
             match app.reopen(&id).await {
-                Ok(window_id) => {
+                Ok(session_name) => {
                     if let Ok(tasks) = app.list_visible(state.active_project_id.as_ref()).await {
                         state.refresh_tasks(tasks);
                     }
-                    app.goto_window(&window_id);
+                    app.goto_task_env(&session_name);
                 }
                 Err(e) => {
                     state.set_status_error(format!("reopen: {e}"));
@@ -1213,7 +1213,7 @@ pub(super) async fn tick_refresh<R: Runtime>(
         let _ = write_response_to_stream(perm.stream, false, None);
     }
     let active = state.active_state_mut();
-    active.task_list.update_window_numbers(app.window_numbers());
+    active.task_list.update_active_envs(app.active_task_envs());
     // Update selected messages and live output for detail view
     if let Some(task) = active.task_list.selected_task() {
         let chat = ChatId::Task(task.id);
