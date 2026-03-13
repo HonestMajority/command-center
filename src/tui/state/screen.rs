@@ -991,4 +991,23 @@ mod tests {
         assert!(matches!(s.focus, Focus::ProjectList));
         assert!(s.project_list.filtered_indices().is_empty());
     }
+
+    // ── refresh_tasks stale index clamping ────────────────────────
+
+    #[test]
+    fn refresh_tasks_clamps_stale_out_of_bounds_index() {
+        let mut s = state_with_tasks(5);
+        // Select the last task (index 4)
+        s.active_state_mut().task_list.list_state.select(Some(4));
+        // Refresh with fewer tasks so index 4 is out of bounds.
+        // First, set the index to something that will cause selected_task()
+        // to return None (out of bounds), simulating a stale index.
+        s.active_state_mut().task_list.list_state.select(Some(10));
+
+        let new_tasks: Vec<Task> = (0..3).map(|i| make_task(&format!("new-{i}"))).collect();
+        s.active_state_mut().task_list.refresh_tasks(new_tasks);
+
+        // The stale index 10 should be clamped to the last valid index (2).
+        assert_eq!(s.active_state().task_list.list_state.selected(), Some(2));
+    }
 }

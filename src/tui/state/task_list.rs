@@ -215,6 +215,13 @@ impl TaskListState {
             }
         } else if !self.tasks.is_empty() && self.list_state.selected().is_none() {
             self.list_state.select(Some(0));
+        } else if !self.tasks.is_empty() {
+            // selected_id was None but list_state has a stale index — clamp it
+            if let Some(i) = self.list_state.selected()
+                && i >= self.tasks.len()
+            {
+                self.list_state.select(Some(self.tasks.len() - 1));
+            }
         }
     }
 

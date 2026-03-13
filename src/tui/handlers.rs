@@ -402,7 +402,9 @@ pub(super) async fn handle_focus_key<R: Runtime>(
         Focus::ChatHistory => handle_chat_history_key(state, key),
         Focus::ConfirmDelete(_) => handle_confirm_delete_key(state, key, app).await,
         Focus::ConfirmCloseTask(_) => handle_confirm_close_task_key(state, key, app).await,
-        Focus::ConfirmDeleteProject(_) => handle_confirm_delete_project_key(state, key, app).await,
+        Focus::ConfirmDeleteProject(_) => {
+            handle_confirm_delete_project_key(state, key, app, project_contexts).await
+        }
         Focus::ConfirmCloseProject => {
             handle_confirm_close_project_key(state, key, app, project_contexts).await
         }
@@ -695,6 +697,7 @@ async fn handle_confirm_delete_project_key<R: Runtime>(
     state: &mut ScreenState,
     key: KeyEvent,
     app: &ClatApp<R>,
+    project_contexts: &mut HashMap<ProjectId, ProjectContext>,
 ) {
     let project_name = match state.current_focus() {
         Focus::ConfirmDeleteProject(name) => name.clone(),
@@ -702,7 +705,20 @@ async fn handle_confirm_delete_project_key<R: Runtime>(
     };
     match key.code {
         KeyCode::Char('y') => {
+            // Resolve the project ID before deleting so we can clean up state.
+            let deleted_pid = app.resolve_project_id(project_name.as_str()).await.ok();
             let _ = app.delete_project(project_name.as_str()).await;
+
+            // If the deleted project was active, switch to ExO.
+            if let Some(pid) = &deleted_pid {
+                if state.active_project_id.as_ref() == Some(pid)
+                    && let Ok(tasks) = app.list_visible(None).await
+                {
+                    state.switch_to_project(None, tasks, None);
+                }
+                super::cancel_project_context(project_contexts, state, pid);
+            }
+
             if let Ok(projects) = app.list_projects().await {
                 state.refresh_projects(projects);
             }
@@ -745,6 +761,8 @@ async fn goto_task_env<R: Runtime>(state: &mut ScreenState, app: &ClatApp<R>) {
         if task.status.is_running() {
             if let Some(env_id) = &task.tmux_window {
                 app.goto_task_env(env_id);
+            } else {
+                state.set_status_error("task has no tmux window".to_string());
             }
         } else {
             let id = task.id.to_string();
@@ -760,6 +778,8 @@ async fn goto_task_env<R: Runtime>(state: &mut ScreenState, app: &ClatApp<R>) {
                 }
             }
         }
+    } else {
+        state.set_status_error("no task selected".to_string());
     }
 }
 
