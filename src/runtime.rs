@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -14,6 +14,7 @@ pub struct SpawnResult {
 
 pub struct LaunchConfig<'a> {
     pub task_name: &'a str,
+    pub task_id_short: &'a str,
     pub session_id: &'a str,
     pub system_prompt: Option<&'a str>,
     pub work_dir: &'a Path,
@@ -71,16 +72,22 @@ pub trait Runtime: Send + Sync + 'static {
     fn resume_agent(
         &self,
         task_name: &str,
+        task_id_short: &str,
         session_id: &str,
         work_dir: &Path,
         skip_permissions: bool,
     ) -> anyhow::Result<SpawnResult>;
-    fn relaunch_agent(&self, task_name: &str, work_dir: &Path) -> anyhow::Result<SpawnResult>;
+    fn relaunch_agent(
+        &self,
+        task_name: &str,
+        task_id_short: &str,
+        work_dir: &Path,
+    ) -> anyhow::Result<SpawnResult>;
     fn send_keys_to_pane(&self, pane_id: &str, message: &str) -> anyhow::Result<()>;
     fn capture_pane_output(&self, pane_id: &str) -> anyhow::Result<String>;
     fn remove_worktree(&self, path: &Path) -> anyhow::Result<()>;
-    fn kill_tmux_window(&self, window_id: &str) -> anyhow::Result<()>;
-    fn select_window(&self, window_id: &str) -> anyhow::Result<()>;
+    fn kill_task_env(&self, env_id: &str) -> anyhow::Result<()>;
+    fn select_task_env(&self, env_id: &str) -> anyhow::Result<()>;
 }
 
 pub struct TmuxRuntime;
@@ -88,19 +95,6 @@ pub struct TmuxRuntime;
 impl TmuxRuntime {
     fn tmux_cmd(&self, args: &[&str]) -> anyhow::Result<String> {
         tmux_cmd(args)
-    }
-
-    fn resolve_binary(&self, name: &str) -> anyhow::Result<String> {
-        let output = Command::new("which")
-            .arg(name)
-            .output()
-            .with_context(|| format!("failed to find {name}"))?;
-
-        if !output.status.success() {
-            bail!("{name} not found in PATH");
-        }
-
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
     fn launch_agent_window(
@@ -307,7 +301,7 @@ impl Runtime for TmuxRuntime {
     }
 
     fn launch_agent(&self, config: LaunchConfig) -> anyhow::Result<SpawnResult> {
-        let claude_bin = self.resolve_binary("claude")?;
+        let claude_bin = resolve_binary("claude")?;
 
         let claude_dir = config.work_dir.join(".claude");
         std::fs::create_dir_all(&claude_dir)?;
@@ -357,11 +351,12 @@ impl Runtime for TmuxRuntime {
     fn resume_agent(
         &self,
         task_name: &str,
+        _task_id_short: &str,
         session_id: &str,
         work_dir: &Path,
         skip_permissions: bool,
     ) -> anyhow::Result<SpawnResult> {
-        let claude_bin = self.resolve_binary("claude")?;
+        let claude_bin = resolve_binary("claude")?;
         let skip_flag = if skip_permissions {
             " --dangerously-skip-permissions"
         } else {
@@ -372,7 +367,12 @@ impl Runtime for TmuxRuntime {
         self.launch_agent_window(task_name, work_dir, &claude_cmd)
     }
 
-    fn relaunch_agent(&self, task_name: &str, work_dir: &Path) -> anyhow::Result<SpawnResult> {
+    fn relaunch_agent(
+        &self,
+        task_name: &str,
+        _task_id_short: &str,
+        work_dir: &Path,
+    ) -> anyhow::Result<SpawnResult> {
         self.launch_agent_window(task_name, work_dir, "sh .claude/launch.sh")
     }
 
@@ -451,15 +451,29 @@ impl Runtime for TmuxRuntime {
         Ok(())
     }
 
-    fn kill_tmux_window(&self, window_id: &str) -> anyhow::Result<()> {
+    fn kill_task_env(&self, window_id: &str) -> anyhow::Result<()> {
         self.tmux_cmd(&["kill-window", "-t", window_id])?;
         Ok(())
     }
 
-    fn select_window(&self, window_id: &str) -> anyhow::Result<()> {
+    fn select_task_env(&self, window_id: &str) -> anyhow::Result<()> {
         self.tmux_cmd(&["select-window", "-t", window_id])?;
         Ok(())
     }
+}
+
+/// Resolve a binary's full path via `which`.
+pub(crate) fn resolve_binary(name: &str) -> anyhow::Result<String> {
+    let output = Command::new("which")
+        .arg(name)
+        .output()
+        .with_context(|| format!("failed to find {name}"))?;
+
+    if !output.status.success() {
+        bail!("{name} not found in PATH");
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 /// Copy hooks config and write settings into a worktree's `.claude/` directory.
@@ -859,19 +873,6 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
         }
     }
     Ok(())
-}
-
-/// Returns a mapping from tmux window ID (e.g. "@24") to window index (e.g. "2").
-pub fn tmux_window_numbers() -> HashMap<WindowId, String> {
-    let mut map = HashMap::new();
-    if let Ok(output) = tmux_cmd(&["list-windows", "-F", "#{window_id} #{window_index}"]) {
-        for line in output.lines() {
-            if let Some((id, index)) = line.split_once(' ') {
-                map.insert(WindowId::from(id.to_string()), index.to_string());
-            }
-        }
-    }
-    map
 }
 
 /// Returns the set of pane IDs that appear idle by inspecting the Claude Code UI.

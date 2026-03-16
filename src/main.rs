@@ -12,6 +12,7 @@ mod runtime;
 mod skill;
 mod store;
 mod task;
+mod tmux_session;
 mod tui;
 mod watch;
 
@@ -24,7 +25,8 @@ use std::sync::Arc;
 use crate::app::{ClatApp, PromptMode, SpawnRequest, WorkDirMode};
 use crate::cli::{AgentCommand, Cli, Command, ProjectAction, SkillAction};
 use crate::primitives::MessageRole;
-use crate::runtime::{Runtime, TmuxRuntime};
+use crate::runtime::Runtime;
+use crate::tmux_session::TmuxSessionRuntime;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -51,7 +53,7 @@ async fn main() -> anyhow::Result<()> {
         } => *dangerously_skip_permissions,
         _ => false,
     };
-    let app = ClatApp::init(TmuxRuntime, skip_permissions).await?;
+    let app = ClatApp::init(TmuxSessionRuntime, skip_permissions).await?;
 
     match command {
         Command::Spawn {
@@ -253,7 +255,7 @@ async fn cmd_list(
         exit_code: String,
     }
 
-    let win_numbers = app.window_numbers();
+    let active_envs = app.active_task_envs();
     let running_pane_ids: Vec<crate::primitives::PaneId> = tasks
         .iter()
         .filter(|t| t.status.is_running())
@@ -279,8 +281,13 @@ async fn cmd_list(
                 win_num: t
                     .tmux_window
                     .as_ref()
-                    .and_then(|w| win_numbers.get(w))
-                    .cloned()
+                    .map(|w| {
+                        if active_envs.contains(w) {
+                            "●".to_string()
+                        } else {
+                            "-".to_string()
+                        }
+                    })
                     .unwrap_or_else(|| "-".to_string()),
                 id: t.id.short().to_string(),
                 name: t.name.as_str().to_string(),
