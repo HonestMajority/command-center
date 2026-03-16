@@ -28,16 +28,7 @@ fn task_list_item(
         Modifier::empty()
     };
     let time = task.started_at.format("%H:%M");
-    let win_num = task
-        .tmux_window
-        .as_ref()
-        .and_then(|w| task_list.window_number(w))
-        .unwrap_or("-");
     let main_line = Line::from(vec![
-        Span::styled(
-            format!("{:<2} ", win_num),
-            Style::default().fg(Color::DarkGray).add_modifier(dim),
-        ),
         Span::styled(
             format!("{status_char} "),
             Style::default()

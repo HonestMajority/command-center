@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
@@ -372,8 +372,10 @@ impl<R: Runtime> ClatApp<R> {
 
         // 6. Launch agent
         let session_id_str = session_id.to_string();
+        let id_short = task.id.short();
         let result = self.runtime.launch_agent(LaunchConfig {
             task_name: req.task_name,
+            task_id_short: &id_short,
             session_id: &session_id_str,
             system_prompt: system_prompt.as_deref(),
             work_dir: &work_dir,
@@ -414,7 +416,7 @@ impl<R: Runtime> ClatApp<R> {
             .and_then(|pane| self.runtime.capture_pane_output(pane.as_str()).ok());
 
         if let Some(ref window_id) = task.tmux_window {
-            let _ = self.runtime.kill_tmux_window(window_id.as_str());
+            let _ = self.runtime.kill_task_env(window_id.as_str());
         }
 
         if task.close(output).did_execute() {
@@ -433,7 +435,7 @@ impl<R: Runtime> ClatApp<R> {
         if task.status.is_running()
             && let Some(ref window_id) = task.tmux_window
         {
-            let _ = self.runtime.kill_tmux_window(window_id.as_str());
+            let _ = self.runtime.kill_task_env(window_id.as_str());
         }
 
         // Clean up the git worktree if the task used one.
@@ -500,13 +502,16 @@ impl<R: Runtime> ClatApp<R> {
         }
 
         let session_id = task.session_id.map(|s| s.to_string()).unwrap_or_default();
+        let id_short = task.id.short();
         let result = if session_id.is_empty() {
             // Legacy task without session_id — fall back to re-running launch.sh
-            // which already has the correct flags baked in from launch_agent().
-            self.runtime.relaunch_agent(task.name.as_str(), work_dir)?
+            // which still exists in the worktree's .claude/ directory.
+            self.runtime
+                .relaunch_agent(task.name.as_str(), &id_short, work_dir)?
         } else {
             self.runtime.resume_agent(
                 task.name.as_str(),
+                &id_short,
                 &session_id,
                 work_dir,
                 self.skip_permissions,
@@ -566,16 +571,16 @@ impl<R: Runtime> ClatApp<R> {
     pub async fn goto(&self, id_prefix: &str) -> anyhow::Result<()> {
         let task = self.resolve_task(id_prefix).await?;
 
-        let window_id = task
+        let env_id = task
             .tmux_window
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("task {} has no tmux window", task.id.short()))?;
+            .ok_or_else(|| anyhow::anyhow!("task {} has no task env", task.id.short()))?;
 
-        self.runtime.select_window(window_id.as_str())
+        self.runtime.select_task_env(env_id.as_str())
     }
 
-    pub fn goto_window(&self, window_id: &WindowId) {
-        let _ = self.runtime.select_window(window_id.as_str());
+    pub fn goto_task_env(&self, env_id: &WindowId) {
+        let _ = self.runtime.select_task_env(env_id.as_str());
     }
 
     pub async fn log(&self, id_prefix: &str) -> anyhow::Result<LogOutput> {
@@ -690,8 +695,8 @@ impl<R: Runtime> ClatApp<R> {
         self.runtime.capture_pane_output(pane_id).ok()
     }
 
-    pub fn window_numbers(&self) -> HashMap<WindowId, String> {
-        crate::runtime::tmux_window_numbers()
+    pub fn active_task_envs(&self) -> HashSet<WindowId> {
+        crate::tmux_session::active_task_envs()
     }
 
     pub async fn insert_session_message(
@@ -742,7 +747,7 @@ impl<R: Runtime> ClatApp<R> {
             if task.status.is_running()
                 && let Some(ref window_id) = task.tmux_window
             {
-                let _ = self.runtime.kill_tmux_window(window_id.as_str());
+                let _ = self.runtime.kill_task_env(window_id.as_str());
             }
             if let Some(ref work_dir) = task.work_dir
                 && work_dir.contains(".claude/worktrees/")
@@ -916,11 +921,11 @@ mod tests {
         RemoveWorktree {
             path: PathBuf,
         },
-        KillWindow {
-            window_id: String,
+        KillTaskEnv {
+            env_id: String,
         },
-        SelectWindow {
-            window_id: String,
+        SelectTaskEnv {
+            env_id: String,
         },
     }
 
@@ -1012,6 +1017,7 @@ mod tests {
         fn resume_agent(
             &self,
             task_name: &str,
+            _task_id_short: &str,
             _session_id: &str,
             work_dir: &Path,
             _skip_permissions: bool,
@@ -1026,7 +1032,12 @@ mod tests {
             })
         }
 
-        fn relaunch_agent(&self, task_name: &str, work_dir: &Path) -> anyhow::Result<SpawnResult> {
+        fn relaunch_agent(
+            &self,
+            task_name: &str,
+            _task_id_short: &str,
+            work_dir: &Path,
+        ) -> anyhow::Result<SpawnResult> {
             self.calls.lock().unwrap().push(Call::ResumeAgent {
                 task_name: task_name.to_string(),
                 work_dir: work_dir.to_path_buf(),
@@ -1063,9 +1074,9 @@ mod tests {
             Ok(())
         }
 
-        fn kill_tmux_window(&self, window_id: &str) -> anyhow::Result<()> {
-            self.calls.lock().unwrap().push(Call::KillWindow {
-                window_id: window_id.to_string(),
+        fn kill_task_env(&self, env_id: &str) -> anyhow::Result<()> {
+            self.calls.lock().unwrap().push(Call::KillTaskEnv {
+                env_id: env_id.to_string(),
             });
             if *self.kill_should_fail.lock().unwrap() {
                 bail!("kill failed");
@@ -1073,9 +1084,9 @@ mod tests {
             Ok(())
         }
 
-        fn select_window(&self, window_id: &str) -> anyhow::Result<()> {
-            self.calls.lock().unwrap().push(Call::SelectWindow {
-                window_id: window_id.to_string(),
+        fn select_task_env(&self, env_id: &str) -> anyhow::Result<()> {
+            self.calls.lock().unwrap().push(Call::SelectTaskEnv {
+                env_id: env_id.to_string(),
             });
             Ok(())
         }
@@ -1196,7 +1207,7 @@ prompt = "noop prompt"
             .unwrap();
         let kill_pos = calls
             .iter()
-            .position(|c| matches!(c, Call::KillWindow { .. }))
+            .position(|c| matches!(c, Call::KillTaskEnv { .. }))
             .unwrap();
         assert!(capture_pos < kill_pos);
     }
@@ -1275,7 +1286,7 @@ prompt = "noop prompt"
     }
 
     #[tokio::test]
-    async fn goto_calls_select_window() {
+    async fn goto_calls_select_task_env() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = test_paths(tmp.path());
         let store = Store::open_in_memory().await.unwrap();
@@ -1287,7 +1298,7 @@ prompt = "noop prompt"
 
         let calls = service.runtime().calls.lock().unwrap();
         assert!(calls.iter().any(|c| matches!(c,
-            Call::SelectWindow { window_id } if window_id == "@fake-win"
+            Call::SelectTaskEnv { env_id } if env_id == "@fake-win"
         )));
     }
 
@@ -1313,7 +1324,7 @@ prompt = "noop prompt"
 
         let err = service.goto(&task.id.to_string()).await;
         assert!(err.is_err());
-        assert!(err.unwrap_err().to_string().contains("no tmux window"));
+        assert!(err.unwrap_err().to_string().contains("no task env"));
     }
 
     #[tokio::test]
