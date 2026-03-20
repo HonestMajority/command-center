@@ -14,6 +14,7 @@ pub use task_list::TaskListState;
 pub use super::input::InputState;
 pub use super::permissions::PermissionStore;
 
+#[derive(Clone)]
 pub enum Focus {
     TaskList,
     ListSearch,

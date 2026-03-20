@@ -194,7 +194,7 @@ impl ProjectState {
         self.chat_view
             .assistant
             .messages
-            .last()
+            .back()
             .filter(|msg| matches!(msg.role, MessageRole::Assistant) && msg.has_text())
             .map(|msg| msg.text_content())
     }

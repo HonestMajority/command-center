@@ -246,12 +246,15 @@ impl ScreenState {
         }
     }
 
-    /// State to display in the chat panel. When the project list is visible
-    /// and a project is highlighted, show that project's PM chat instead of
-    /// the active task chat.
-    pub fn chat_display_state(&self) -> (&ProjectState, Option<&str>) {
-        let name = self.active_project_name.as_ref().map(|n| n.as_str());
-        (self.active_state(), name)
+    /// State to display in the chat panel (mutable for render caching).
+    /// When the project list is visible and a project is highlighted, show
+    /// that project's PM chat instead of the active task chat.
+    pub fn chat_display_state_mut(&mut self) -> (&mut ProjectState, Option<String>) {
+        let name = self
+            .active_project_name
+            .as_ref()
+            .map(|n| n.as_str().to_string());
+        (self.active_state_mut(), name)
     }
 
     /// Get a mutable reference to the active project state.

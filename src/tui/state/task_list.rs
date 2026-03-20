@@ -1,9 +1,13 @@
 use std::collections::HashSet;
+use std::time::Instant;
 
 use ratatui::widgets::ListState;
 
 use crate::primitives::{PaneId, TaskId, TaskName, WindowId};
 use crate::task::{Task, TaskMessage};
+
+/// Minimum interval between `capture_pane` subprocess calls.
+const CAPTURE_PANE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1000);
 
 pub struct TaskListState {
     pub tasks: Vec<Task>,
@@ -12,6 +16,8 @@ pub struct TaskListState {
     selected_messages: Vec<TaskMessage>,
     detail_scroll: u16,
     detail_live_output: Option<String>,
+    /// Timestamp of the last `capture_pane` call. Used to throttle subprocess spawning.
+    last_capture: Option<Instant>,
     /// Set of task environment IDs (tmux session/window names) that currently exist.
     active_envs: HashSet<WindowId>,
     /// Pane IDs that are actively working (hook reported activity).
@@ -40,6 +46,7 @@ impl TaskListState {
             selected_messages: Vec::new(),
             detail_scroll: 0,
             detail_live_output: None,
+            last_capture: None,
             active_envs: HashSet::new(),
             active_panes: HashSet::new(),
             filtered_indices: Vec::new(),
@@ -104,6 +111,20 @@ impl TaskListState {
 
     pub fn live_output(&self) -> Option<&str> {
         self.detail_live_output.as_deref()
+    }
+
+    /// Returns true if enough time has elapsed since the last capture to allow
+    /// another subprocess call. Also records the current instant on `true`.
+    pub fn should_capture_pane(&mut self) -> bool {
+        let now = Instant::now();
+        if self
+            .last_capture
+            .is_some_and(|t| now.duration_since(t) < CAPTURE_PANE_INTERVAL)
+        {
+            return false;
+        }
+        self.last_capture = Some(now);
+        true
     }
 
     // ── Task environment tracking ───────────────────────────────────────

@@ -1,5 +1,11 @@
+use std::collections::VecDeque;
+
 use crate::primitives::MessageRole;
 use crate::task::TaskMessage;
+
+/// Maximum number of chat messages kept in memory.
+/// Older messages are dropped from the front; full history lives in the DB.
+const MAX_CHAT_MESSAGES: usize = 500;
 
 pub enum ContentBlock {
     Text(String),
@@ -32,29 +38,42 @@ impl ChatMessage {
 
 pub struct AssistantChat {
     pub session_id: Option<String>,
-    pub messages: Vec<ChatMessage>,
+    pub messages: VecDeque<ChatMessage>,
     pub streaming: bool,
     /// Tracks whether an error event was received in the current process
     /// lifecycle. Used to avoid pre-spawning after a failed process exit.
     pub had_process_error: bool,
+    /// Monotonic counter incremented on every mutation (add/append/finish).
+    /// Used by the render cache to detect when lines need rebuilding.
+    pub generation: u64,
 }
 
 impl AssistantChat {
     pub fn new() -> Self {
         Self {
             session_id: None,
-            messages: Vec::new(),
+            messages: VecDeque::new(),
             streaming: false,
             had_process_error: false,
+            generation: 0,
         }
     }
 
+    /// Push a message, enforcing the capacity cap.
+    fn push_message(&mut self, msg: ChatMessage) {
+        if self.messages.len() >= MAX_CHAT_MESSAGES {
+            self.messages.pop_front();
+        }
+        self.messages.push_back(msg);
+        self.generation = self.generation.wrapping_add(1);
+    }
+
     pub fn add_user_message(&mut self, content: String) {
-        self.messages.push(ChatMessage {
+        self.push_message(ChatMessage {
             role: MessageRole::User,
             blocks: vec![ContentBlock::Text(content)],
         });
-        self.messages.push(ChatMessage {
+        self.push_message(ChatMessage {
             role: MessageRole::Assistant,
             blocks: Vec::new(),
         });
@@ -64,7 +83,7 @@ impl AssistantChat {
     pub fn append_text(&mut self, text: &str) {
         if let Some(msg) = self
             .messages
-            .last_mut()
+            .back_mut()
             .filter(|m| matches!(m.role, MessageRole::Assistant))
         {
             // Append to the last Text block, or create a new one
@@ -73,16 +92,18 @@ impl AssistantChat {
             } else {
                 msg.blocks.push(ContentBlock::Text(text.to_string()));
             }
+            self.generation = self.generation.wrapping_add(1);
         }
     }
 
     pub fn add_tool_activity(&mut self, tool: String) {
         if let Some(msg) = self
             .messages
-            .last_mut()
+            .back_mut()
             .filter(|m| matches!(m.role, MessageRole::Assistant))
         {
             msg.blocks.push(ContentBlock::ToolUse(tool));
+            self.generation = self.generation.wrapping_add(1);
         }
     }
 
@@ -91,10 +112,10 @@ impl AssistantChat {
     pub fn add_error(&mut self, error: &str) {
         let has_assistant = self
             .messages
-            .last()
+            .back()
             .is_some_and(|m| matches!(m.role, MessageRole::Assistant));
         if !has_assistant {
-            self.messages.push(ChatMessage {
+            self.push_message(ChatMessage {
                 role: MessageRole::Assistant,
                 blocks: Vec::new(),
             });
@@ -105,13 +126,14 @@ impl AssistantChat {
 
     pub fn finish_streaming(&mut self) {
         self.streaming = false;
+        self.generation = self.generation.wrapping_add(1);
     }
 
     pub fn load_history(&mut self, messages: Vec<TaskMessage>) {
         for msg in messages {
             match msg.role {
                 MessageRole::User | MessageRole::Assistant => {
-                    self.messages.push(ChatMessage {
+                    self.push_message(ChatMessage {
                         role: msg.role,
                         blocks: vec![ContentBlock::Text(msg.content)],
                     });
@@ -182,7 +204,7 @@ mod tests {
     fn add_error_does_not_append_to_user_message() {
         let mut exo = AssistantChat::new();
         // Manually push just a user message (no assistant follows)
-        exo.messages.push(ChatMessage {
+        exo.messages.push_back(ChatMessage {
             role: MessageRole::User,
             blocks: vec![ContentBlock::Text("test".into())],
         });
